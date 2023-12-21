@@ -1,12 +1,14 @@
-from flask import Flask,request,jsonify
+from functools import wraps
+from flask import Flask, redirect,request,jsonify
 from flask_sqlalchemy import SQLAlchemy
-# from flask_marshmallow import Marshmallow
+import datetime
+import jwt
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///todo.db'
+app.config['SECRET_KEY'] ='ThisIsSecretKey'
 
 db = SQLAlchemy(app)
-# ma = Marshmallow(app)
 
 class User(db.Model):
      id = db.Column(db.Integer,primary_key = True)
@@ -19,12 +21,32 @@ class User(db.Model):
         self.user_name = user_name
         self.password = password
         
-# class PostSchema(ma.Schema):
-#     class Meta:
-#         fields = ("email", "user_name", "password")
-        
-# post_schema = PostSchema()
-# posts_schema = PostSchema(many=True)
+blacklisted_tokens = set()
+
+def token_required(f):
+    @wraps(f)
+    def decorator(*args, **kwargs):
+        token = request.headers.get('access-token')
+
+        if not token:
+            return jsonify({'msg': 'Token not found'}), 401
+
+        if is_token_blacklisted(token):
+            return jsonify({'msg': 'Token is no longer valid'}), 401
+
+        try:
+            user_data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+            user = User.query.get(user_data['user_id'])
+        except jwt.ExpiredSignatureError:
+            return jsonify({'msg': 'Token is expired'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'msg': 'Invalid token'}), 401
+        except Exception as e:
+            return jsonify({'msg': 'Error decoding token', 'error': str(e)}), 401
+
+        return f(user, *args, **kwargs)
+
+    return decorator
 
 @app.route('/sign_up/', methods = ['POST'])
 def Signup():
@@ -36,20 +58,37 @@ def Signup():
     db.session.add(my_post)
     db.session.commit()
     
-#   return post_schema.jsonify(my_post)
-    return jsonify({"msg":"updated"})
+    return jsonify({"msg":"User Created Succesful"})
 
 @app.route('/login', methods = ["POST"])
-def Login():
-     email = request.json['email']
-     password = request.json['password']
-     
-     post = User.query.filter_by(email=email).first()
-     # print("this is post password.................",post.password,type(post.password))
-     # print("this is password,,,,,,,,,,,,,,,,,,,,,, ",password,type(password))
-     if post.password ==password:
-          return jsonify({"msg":"succesful"})
-     return jsonify({"msg":"invalid details"})
+def login():
+    email = request.json['email']
+    password = request.json['password']
+
+    post = User.query.filter_by(email=email).first()
+
+    if not post or post.password != password:
+        return jsonify({"msg": "Invalid credentials"}), 401
+
+    token = jwt.encode(
+        {'user_id': post.id,
+         'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=120)},
+        app.config['SECRET_KEY']
+    )
+
+    return jsonify({'token': token})
+def is_token_blacklisted(token):
+    return token in blacklisted_tokens
+
+@token_required 
+@app.route('/logout', methods=["POST"])
+def logout():
+    token = request.headers.get('access-token')
+
+    blacklisted_tokens.add(token)
+
+    return jsonify({"msg": "Successfully logged out"})
+
 with app.app_context():
      db.create_all()
 
